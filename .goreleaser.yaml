@@ -1,0 +1,80 @@
+version: 2
+
+project_name: cymbal
+
+builds:
+  - id: cymbal
+    main: .
+    binary: cymbal
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=o64-clang
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CC=oa64-clang
+      - goos: linux
+        goarch: amd64
+        env:
+          - CC=gcc
+      - goos: linux
+        goarch: arm64
+        env:
+          - CC=aarch64-linux-gnu-gcc
+
+archives:
+  - id: cymbal
+    ids:
+      - cymbal
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+brews:
+  - ids:
+      - cymbal
+    repository:
+      owner: 1broseidon
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    commit_msg_template: "formula: update cymbal to {{ .Tag }}"
+    homepage: https://github.com/1broseidon/cymbal
+    description: Blazing-fast code indexer and symbol discovery CLI powered by tree-sitter
+    license: MIT
+    install: |
+      bin.install "cymbal"
