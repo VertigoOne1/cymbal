@@ -64,8 +64,17 @@ you already have installed and authenticated.`,
 		}
 
 		elapsed := time.Since(start)
-		msg := fmt.Sprintf("Done in %s — %d files indexed, %d symbols found, %d skipped (unchanged)",
+		msg := fmt.Sprintf("Done in %s — %d indexed, %d symbols, %d unchanged",
 			elapsed.Round(time.Millisecond), stats.FilesIndexed, stats.SymbolsFound, stats.FilesSkipped)
+		if stats.StaleRemoved > 0 {
+			msg += fmt.Sprintf(", %d stale removed", stats.StaleRemoved)
+		}
+		if stats.ParseErrors > 0 {
+			msg += fmt.Sprintf(", %d parse errors", stats.ParseErrors)
+		}
+		if stats.WriteErrors > 0 {
+			msg += fmt.Sprintf(", %d write errors", stats.WriteErrors)
+		}
 		if stats.Summarized > 0 {
 			msg += fmt.Sprintf(", %d summarized", stats.Summarized)
 		}

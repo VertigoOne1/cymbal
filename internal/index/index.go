@@ -32,10 +32,14 @@ type Options struct {
 // Stats reports indexing results.
 type Stats struct {
 	FilesIndexed int
-	FilesSkipped int
+	FilesSkipped int // unchanged (mtime match)
+	FilesUnsup   int // unsupported language
+	ParseErrors  int // parser.ParseFile failures
+	WriteErrors  int // DB write failures
 	SymbolsFound int
+	StaleRemoved int
 	Summarized   int
-	Errors       int
+	Errors       int // total errors (ParseErrors + WriteErrors)
 }
 
 // SearchQuery defines a search request.
@@ -91,6 +95,64 @@ func FindGitRoot(dir string) (string, error) {
 	return "", fmt.Errorf("no git repository found from %s", dir)
 }
 
+// parseResult holds the output of a parse worker.
+type parseResult struct {
+	entry  walker.FileEntry
+	hash   string
+	result *symbols.ParseResult
+}
+
+// flushBatch writes a batch of parse results to the DB in a single transaction.
+// Uses SAVEPOINTs per file so a single failure doesn't corrupt the batch.
+// Stats are published only after successful commit.
+func flushBatch(store *Store, batch []parseResult, indexed, found, writeErrs *atomic.Int64) {
+	if len(batch) == 0 {
+		return
+	}
+	tx, err := store.db.Begin()
+	if err != nil {
+		writeErrs.Add(int64(len(batch)))
+		return
+	}
+
+	type fileStats struct{ symbolCount int }
+	committed := make([]fileStats, 0, len(batch))
+
+	for i, pr := range batch {
+		sp := fmt.Sprintf("sp_%d", i)
+		if _, err := tx.Exec("SAVEPOINT " + sp); err != nil {
+			writeErrs.Add(1)
+			continue
+		}
+
+		err := store.InsertFileAllTx(tx, pr.entry.Path, pr.entry.RelPath,
+			pr.entry.Language, pr.hash, pr.entry.ModTime,
+			pr.result.Symbols, pr.result.Imports, pr.result.Refs)
+		if err != nil {
+			tx.Exec("ROLLBACK TO " + sp)
+			writeErrs.Add(1)
+			continue
+		}
+
+		if _, err := tx.Exec("RELEASE " + sp); err != nil {
+			tx.Exec("ROLLBACK TO " + sp)
+			writeErrs.Add(1)
+			continue
+		}
+
+		committed = append(committed, fileStats{symbolCount: len(pr.result.Symbols)})
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeErrs.Add(int64(len(committed)))
+	} else {
+		for _, fs := range committed {
+			indexed.Add(1)
+			found.Add(int64(fs.symbolCount))
+		}
+	}
+}
+
 // Index indexes all source files under root.
 // If dbPath is empty, it is auto-computed from root using RepoDBPath.
 func Index(root, dbPath string, opts Options) (*Stats, error) {
@@ -129,19 +191,29 @@ func Index(root, dbPath string, opts Options) (*Stats, error) {
 		mtimes = make(map[string]time.Time)
 	}
 
-	// parseResult holds the output of a parse worker.
-	type parseResult struct {
-		entry  walker.FileEntry
-		hash   string
-		result *symbols.ParseResult
+	// Phase 0: prune stale files (deleted/renamed since last index).
+	currentPaths := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		currentPaths[f.Path] = struct{}{}
 	}
+	staleRemoved, _ := store.DeleteStalePaths(currentPaths)
+
+	// (parseResult is defined at package level)
 
 	var (
-		indexed  atomic.Int64
-		skipped  atomic.Int64
-		found    atomic.Int64
-		errCount int
+		indexed   atomic.Int64
+		unchanged atomic.Int64
+		unsup     atomic.Int64
+		parseErrs atomic.Int64
+		found     atomic.Int64
+		writeErrs atomic.Int64
 	)
+
+	// processed tracks total files done (for progress).
+	processed := func() int64 {
+		return indexed.Load() + unchanged.Load() + unsup.Load() + parseErrs.Load()
+	}
+	_ = processed // used in progress goroutine
 
 	totalFiles := len(files)
 
@@ -156,21 +228,21 @@ func Index(root, dbPath string, opts Options) (*Stats, error) {
 			defer parseWg.Done()
 			for f := range parseCh {
 				if !parser.SupportedLanguage(f.Language) {
-					skipped.Add(1)
+					unsup.Add(1)
 					continue
 				}
 
 				if !opts.Force {
 					// Fast path: check mtime from pre-loaded map (no DB query).
 					if storedMtime, ok := mtimes[f.Path]; ok && !storedMtime.IsZero() && !f.ModTime.After(storedMtime) {
-						skipped.Add(1)
+						unchanged.Add(1)
 						continue
 					}
 				}
 
 				result, err := parser.ParseFile(f.Path, f.Language)
 				if err != nil {
-					skipped.Add(1)
+					parseErrs.Add(1)
 					continue
 				}
 
@@ -199,56 +271,36 @@ func Index(root, dbPath string, opts Options) (*Stats, error) {
 		close(parseCh)
 	}()
 
-	progressDone := startProgress(totalFiles, &indexed, &skipped, &found)
+	progressDone := startProgress(totalFiles, &indexed, &unchanged, &found)
 
 	// Phase 2: serial writer — batched transactions, no lock contention.
+	// Uses SAVEPOINT per file so a single file failure doesn't corrupt the batch.
+	// Stats are accumulated locally and published only after successful commit.
 	const batchSize = 100
 	var batch []parseResult
-
-	flushBatch := func() {
-		if len(batch) == 0 {
-			return
-		}
-		tx, err := store.db.Begin()
-		if err != nil {
-			errCount += len(batch)
-			batch = batch[:0]
-			return
-		}
-
-		for _, pr := range batch {
-			err := store.InsertFileAllTx(tx, pr.entry.Path, pr.entry.RelPath,
-				pr.entry.Language, pr.hash, pr.entry.ModTime,
-				pr.result.Symbols, pr.result.Imports, pr.result.Refs)
-			if err != nil {
-				errCount++
-				continue
-			}
-			indexed.Add(1)
-			found.Add(int64(len(pr.result.Symbols)))
-		}
-
-		if err := tx.Commit(); err != nil {
-			errCount += len(batch)
-		}
-		batch = batch[:0]
-	}
 
 	for pr := range resultCh {
 		batch = append(batch, pr)
 		if len(batch) >= batchSize {
-			flushBatch()
+			flushBatch(store, batch, &indexed, &found, &writeErrs)
+			batch = batch[:0]
 		}
 	}
-	flushBatch()
+	flushBatch(store, batch, &indexed, &found, &writeErrs)
 
 	close(progressDone)
 
+	pe := int(parseErrs.Load())
+	we := int(writeErrs.Load())
 	stats := &Stats{
 		FilesIndexed: int(indexed.Load()),
-		FilesSkipped: int(skipped.Load()),
+		FilesSkipped: int(unchanged.Load()),
+		FilesUnsup:   int(unsup.Load()),
+		ParseErrors:  pe,
+		WriteErrors:  we,
 		SymbolsFound: int(found.Load()),
-		Errors:       errCount,
+		StaleRemoved: staleRemoved,
+		Errors:       pe + we,
 	}
 
 	// Summarization pass — runs after indexing is complete.

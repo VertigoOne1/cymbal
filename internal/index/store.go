@@ -186,6 +186,79 @@ func (s *Store) AllFileMtimes() (map[string]time.Time, error) {
 	return m, nil
 }
 
+// AllStoredPaths returns all file paths currently in the index.
+func (s *Store) AllStoredPaths() ([]string, error) {
+	rows, err := s.db.Query("SELECT path FROM files")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			continue
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+// DeleteStalePaths removes files from the index whose paths are not in the
+// provided set of current paths. Returns the number of rows deleted.
+func (s *Store) DeleteStalePaths(currentPaths map[string]struct{}) (int, error) {
+	stored, err := s.AllStoredPaths()
+	if err != nil {
+		return 0, err
+	}
+
+	var stale []string
+	for _, p := range stored {
+		if _, ok := currentPaths[p]; !ok {
+			stale = append(stale, p)
+		}
+	}
+
+	if len(stale) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	const batchSize = 100
+	deleted := 0
+	for i := 0; i < len(stale); i += batchSize {
+		end := i + batchSize
+		if end > len(stale) {
+			end = len(stale)
+		}
+		batch := stale[i:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for j, p := range batch {
+			placeholders[j] = "?"
+			args[j] = p
+		}
+		q := "DELETE FROM files WHERE path IN (" + strings.Join(placeholders, ",") + ")"
+		res, err := tx.Exec(q, args...)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		deleted += int(n)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 // HashFile computes SHA-256 of a file.
 func HashFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
