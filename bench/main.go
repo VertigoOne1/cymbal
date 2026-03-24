@@ -129,6 +129,16 @@ func defineTools(cymbalBin string) []Tool {
 				OpSearch: func(dir, sym string) *exec.Cmd {
 					return exec.Command("rg", "--no-heading", "-c", sym)
 				},
+				OpRefs: func(dir, sym string) *exec.Cmd {
+					// rg has no semantic refs — just grep for the symbol name.
+					return exec.Command("rg", "--no-heading", "-n", sym)
+				},
+				OpShow: func(dir, sym string) *exec.Cmd {
+					// Approximate "show": find definition-like pattern, show context.
+					// This is what an agent would actually do without cymbal.
+					pattern := "(?:def |func |class |type |interface |struct )" + sym
+					return exec.Command("rg", "--no-heading", "-n", "-A", "30", pattern)
+				},
 			},
 		},
 		{
@@ -364,8 +374,8 @@ func generateReport(results []Result, tools []Tool) string {
 		}
 		b.WriteString("\n")
 
-		// Query tables.
-		b.WriteString("### Queries\n\n")
+		// Query tables — speed.
+		b.WriteString("### Query Speed\n\n")
 		b.WriteString("| Symbol | Op |")
 		for _, tn := range toolNames {
 			b.WriteString(fmt.Sprintf(" %s |", tn))
@@ -404,6 +414,33 @@ func generateReport(results []Result, tools []Tool) string {
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
+
+		// Query tables — output size (token efficiency).
+		b.WriteString("### Output Size (Token Efficiency)\n\n")
+		b.WriteString("| Symbol | Op |")
+		for _, tn := range toolNames {
+			b.WriteString(fmt.Sprintf(" %s |", tn))
+		}
+		b.WriteString("\n|---|---|")
+		for range toolNames {
+			b.WriteString("---|")
+		}
+		b.WriteString("\n")
+
+		for _, p := range pairs {
+			b.WriteString(fmt.Sprintf("| `%s` | %s |", p.sym, p.op))
+			for _, tn := range toolNames {
+				r := findResult(byRepo[repo], tn, Op(p.op), p.sym)
+				if r == nil {
+					b.WriteString(" — |")
+				} else {
+					tokens := r.Output / 4 // rough cl100k_base approximation
+					b.WriteString(fmt.Sprintf(" %s (~%d tok) |", fmtBytes(r.Output), tokens))
+				}
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 	}
 
 	return b.String()
@@ -427,6 +464,13 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000)
 	}
 	return fmt.Sprintf("%.2fs", d.Seconds())
+}
+
+func fmtBytes(n int) string {
+	if n < 1024 {
+		return fmt.Sprintf("%dB", n)
+	}
+	return fmt.Sprintf("%.1fKB", float64(n)/1024)
 }
 
 // ── Entrypoint ─────────────────────────────────────────────────────
