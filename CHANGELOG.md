@@ -2,6 +2,17 @@
 
 All notable changes to cymbal are documented here.
 
+## [0.2.0] - 2026-03-23
+
+### Changed
+
+- All commands now output agent-native frontmatter+content format by default (YAML metadata + content body, optimized for LLM token efficiency)
+- `refs` and `impact` deduplicate identical call sites — grouped by file with site count
+- `context` callers section uses the same dedup
+- `search` results ranked by relevance: exact name match first, then prefix, then contains
+- Default limits lowered: refs 50→20, impact 100→50, search 50→20
+- `refs`, `impact`, and `context` now show actual source lines at call sites, not just line numbers
+
 ## [0.1.0] - 2026-03-23
 
 ### Added
