@@ -15,66 +15,24 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Resolve release ref
-        id: ref
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "ref=refs/tags/${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
-          fi
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+    runs-on: ${{ matrix.runner }}
 
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ steps.ref.outputs.ref }}
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
-
-      - name: Run tests
-        run: CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go test ./...
-
-      - name: Build linux/amd64 (native)
-        run: |
-          CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" \
-            GOOS=linux GOARCH=amd64 \
-            go build -trimpath -ldflags="-s -w" -o cymbal .
-          tar czf cymbal_linux_amd64.tar.gz cymbal
-          rm cymbal
-
-      - name: Build linux/arm64 (zig cross)
-        run: |
-          go clean -cache
-
-          cat > /tmp/zig-cc << 'EOF'
-          #!/bin/sh
-          exec zig cc -target aarch64-linux-gnu "$@"
-          EOF
-          chmod +x /tmp/zig-cc
-
-          CC=/tmp/zig-cc CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" \
-            GOOS=linux GOARCH=arm64 \
-            go build -trimpath -ldflags="-s -w -linkmode=external -extld=/tmp/zig-cc" -o cymbal .
-          tar czf cymbal_linux_arm64.tar.gz cymbal
-          rm cymbal
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: binaries-linux
-          path: cymbal_linux_*.tar.gz
-
-  build-darwin:
-    runs-on: macos-latest
     steps:
       - name: Resolve release ref
         id: ref
@@ -98,29 +56,19 @@ jobs:
       - name: Run tests
         run: CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go test ./...
 
-      - name: Build darwin/arm64 (native)
+      - name: Build
         run: |
           CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" \
-            GOOS=darwin GOARCH=arm64 \
             go build -trimpath -ldflags="-s -w" -o cymbal .
-          tar czf cymbal_darwin_arm64.tar.gz cymbal
-          rm cymbal
-
-      - name: Build darwin/amd64 (native cross)
-        run: |
-          CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" \
-            GOOS=darwin GOARCH=amd64 \
-            go build -trimpath -ldflags="-s -w" -o cymbal .
-          tar czf cymbal_darwin_amd64.tar.gz cymbal
-          rm cymbal
+          tar czf cymbal_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz cymbal
 
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries-darwin
-          path: cymbal_darwin_*.tar.gz
+          name: cymbal_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: cymbal_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
 
   release:
-    needs: [build-linux, build-darwin]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Resolve tag name
