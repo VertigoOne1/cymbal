@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS files (
 	rel_path TEXT NOT NULL,
 	language TEXT NOT NULL,
 	hash     TEXT NOT NULL,
-	indexed_at DATETIME NOT NULL
+	indexed_at DATETIME NOT NULL,
+	mtime    DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS symbols (
@@ -110,6 +111,9 @@ func OpenStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("initializing schema: %w", err)
 	}
 
+	// Migration: add mtime column for existing databases.
+	db.Exec("ALTER TABLE files ADD COLUMN mtime DATETIME")
+
 	db.Exec("PRAGMA cache_size = -64000")
 	db.Exec("PRAGMA mmap_size = 268435456")
 	db.Exec("PRAGMA temp_store = MEMORY")
@@ -152,6 +156,36 @@ func (s *Store) FileHash(filePath string) (string, error) {
 	return hash, err
 }
 
+// FileMtime returns the stored modification time for a file.
+func (s *Store) FileMtime(filePath string) (time.Time, error) {
+	var mtime time.Time
+	err := s.db.QueryRow("SELECT mtime FROM files WHERE path = ?", filePath).Scan(&mtime)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return mtime, nil
+}
+
+// AllFileMtimes loads all file paths and their stored mtimes in one query.
+func (s *Store) AllFileMtimes() (map[string]time.Time, error) {
+	rows, err := s.db.Query("SELECT path, mtime FROM files WHERE mtime IS NOT NULL")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[string]time.Time)
+	for rows.Next() {
+		var path string
+		var mtime time.Time
+		if err := rows.Scan(&path, &mtime); err != nil {
+			continue
+		}
+		m[path] = mtime
+	}
+	return m, nil
+}
+
 // HashFile computes SHA-256 of a file.
 func HashFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
@@ -163,13 +197,13 @@ func HashFile(path string) (string, error) {
 }
 
 // UpsertFile stores file info and returns the file ID. Clears old data via cascade.
-func (s *Store) UpsertFile(filePath, relPath, lang, hash string) (int64, error) {
+func (s *Store) UpsertFile(filePath, relPath, lang, hash string, mtime time.Time) (int64, error) {
 	now := time.Now()
 	s.db.Exec("DELETE FROM files WHERE path = ?", filePath)
 
 	res, err := s.db.Exec(
-		"INSERT INTO files (path, rel_path, language, hash, indexed_at) VALUES (?, ?, ?, ?, ?)",
-		filePath, relPath, lang, hash, now,
+		"INSERT INTO files (path, rel_path, language, hash, indexed_at, mtime) VALUES (?, ?, ?, ?, ?, ?)",
+		filePath, relPath, lang, hash, now, mtime,
 	)
 	if err != nil {
 		return 0, err
@@ -188,6 +222,13 @@ func (s *Store) InsertSymbols(fileID int64, syms []symbols.Symbol) error {
 	}
 	defer tx.Rollback()
 
+	if err := insertSymbolsTx(tx, fileID, syms); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertSymbolsTx(tx *sql.Tx, fileID int64, syms []symbols.Symbol) error {
 	stmt, err := tx.Prepare(`INSERT INTO symbols
 		(file_id, name, kind, start_line, end_line, start_col, end_col, parent, depth, signature, summary, language)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -206,8 +247,7 @@ func (s *Store) InsertSymbols(fileID int64, syms []symbols.Symbol) error {
 			return err
 		}
 	}
-
-	return tx.Commit()
+	return nil
 }
 
 // InsertImports batch-inserts imports for a file.
@@ -221,6 +261,13 @@ func (s *Store) InsertImports(fileID int64, imports []symbols.Import) error {
 	}
 	defer tx.Rollback()
 
+	if err := insertImportsTx(tx, fileID, imports); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertImportsTx(tx *sql.Tx, fileID int64, imports []symbols.Import) error {
 	stmt, err := tx.Prepare("INSERT INTO imports (file_id, raw_path, language) VALUES (?, ?, ?)")
 	if err != nil {
 		return err
@@ -232,7 +279,7 @@ func (s *Store) InsertImports(fileID int64, imports []symbols.Import) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // InsertRefs batch-inserts refs for a file.
@@ -246,6 +293,13 @@ func (s *Store) InsertRefs(fileID int64, refs []symbols.Ref) error {
 	}
 	defer tx.Rollback()
 
+	if err := insertRefsTx(tx, fileID, refs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertRefsTx(tx *sql.Tx, fileID int64, refs []symbols.Ref) error {
 	stmt, err := tx.Prepare("INSERT INTO refs (file_id, line, name, language) VALUES (?, ?, ?, ?)")
 	if err != nil {
 		return err
@@ -257,7 +311,51 @@ func (s *Store) InsertRefs(fileID int64, refs []symbols.Ref) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// InsertFileAll inserts a file and all its data (symbols, imports, refs) in a single
+// transaction operation. Designed for use within an external transaction via InsertFileAllTx.
+func (s *Store) InsertFileAll(filePath, relPath, lang, hash string, mtime time.Time, syms []symbols.Symbol, imports []symbols.Import, refs []symbols.Ref) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := s.InsertFileAllTx(tx, filePath, relPath, lang, hash, mtime, syms, imports, refs); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// InsertFileAllTx inserts a file and all its data within an existing transaction.
+func (s *Store) InsertFileAllTx(tx *sql.Tx, filePath, relPath, lang, hash string, mtime time.Time, syms []symbols.Symbol, imports []symbols.Import, refs []symbols.Ref) error {
+	now := time.Now()
+	tx.Exec("DELETE FROM files WHERE path = ?", filePath)
+
+	res, err := tx.Exec(
+		"INSERT INTO files (path, rel_path, language, hash, indexed_at, mtime) VALUES (?, ?, ?, ?, ?, ?)",
+		filePath, relPath, lang, hash, now, mtime,
+	)
+	if err != nil {
+		return err
+	}
+	fileID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	if err := insertSymbolsTx(tx, fileID, syms); err != nil {
+		return err
+	}
+	if err := insertImportsTx(tx, fileID, imports); err != nil {
+		return err
+	}
+	if err := insertRefsTx(tx, fileID, refs); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SymbolResult holds a search result.

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // FileEntry is a file discovered during walking.
@@ -16,6 +17,7 @@ type FileEntry struct {
 	RelPath  string
 	Size     int64
 	Language string
+	ModTime  time.Time
 }
 
 // TreeNode represents a directory/file tree.
@@ -146,6 +148,7 @@ func Walk(root string, workers int) ([]FileEntry, error) {
 					RelPath:  rel,
 					Size:     info.Size(),
 					Language: lang,
+					ModTime:  info.ModTime(),
 				}
 				mu.Lock()
 				files = append(files, entry)

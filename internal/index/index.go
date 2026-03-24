@@ -12,9 +12,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/1broseidon/cymbal/internal/parser"
 	"github.com/1broseidon/cymbal/internal/summarize"
+	"github.com/1broseidon/cymbal/internal/symbols"
 	"github.com/1broseidon/cymbal/internal/walker"
 )
 
@@ -121,82 +123,132 @@ func Index(root, dbPath string, opts Options) (*Stats, error) {
 		return nil, fmt.Errorf("walking directory: %w", err)
 	}
 
+	// Load all stored mtimes in one query for fast skip checks.
+	mtimes, _ := store.AllFileMtimes()
+	if mtimes == nil {
+		mtimes = make(map[string]time.Time)
+	}
+
+	// parseResult holds the output of a parse worker.
+	type parseResult struct {
+		entry  walker.FileEntry
+		hash   string
+		result *symbols.ParseResult
+	}
+
 	var (
-		indexed atomic.Int64
-		skipped atomic.Int64
-		found   atomic.Int64
-		errors  atomic.Int64
+		indexed  atomic.Int64
+		skipped  atomic.Int64
+		found    atomic.Int64
+		errCount int
 	)
 
-	ch := make(chan walker.FileEntry, 256)
-	var wg sync.WaitGroup
+	totalFiles := len(files)
 
+	parseCh := make(chan walker.FileEntry, 256)
+	resultCh := make(chan parseResult, 256)
+
+	// Phase 1: parse workers — CPU-bound, fully parallel.
+	var parseWg sync.WaitGroup
 	for range workers {
-		wg.Add(1)
+		parseWg.Add(1)
 		go func() {
-			defer wg.Done()
-			for f := range ch {
+			defer parseWg.Done()
+			for f := range parseCh {
 				if !parser.SupportedLanguage(f.Language) {
 					skipped.Add(1)
 					continue
 				}
 
 				if !opts.Force {
-					hash, err := HashFile(f.Path)
-					if err == nil {
-						existingHash, _ := store.FileHash(f.Path)
-						if existingHash == hash {
-							skipped.Add(1)
-							continue
-						}
+					// Fast path: check mtime from pre-loaded map (no DB query).
+					if storedMtime, ok := mtimes[f.Path]; ok && !storedMtime.IsZero() && !f.ModTime.After(storedMtime) {
+						skipped.Add(1)
+						continue
 					}
 				}
 
 				result, err := parser.ParseFile(f.Path, f.Language)
 				if err != nil {
-					errors.Add(1)
+					skipped.Add(1)
 					continue
 				}
 
-				hash, _ := HashFile(f.Path)
-				fileID, err := store.UpsertFile(f.Path, f.RelPath, f.Language, hash)
-				if err != nil {
-					errors.Add(1)
-					continue
+				// Only compute hash when there's a stored entry to compare against.
+				// On cold index this avoids reading every file a second time.
+				var hash string
+				if _, exists := mtimes[f.Path]; exists {
+					hash, _ = HashFile(f.Path)
 				}
-
-				if err := store.InsertSymbols(fileID, result.Symbols); err != nil {
-					errors.Add(1)
-					continue
-				}
-
-				if err := store.InsertImports(fileID, result.Imports); err != nil {
-					errors.Add(1)
-					continue
-				}
-
-				if err := store.InsertRefs(fileID, result.Refs); err != nil {
-					errors.Add(1)
-					continue
-				}
-
-				indexed.Add(1)
-				found.Add(int64(len(result.Symbols)))
+				resultCh <- parseResult{entry: f, hash: hash, result: result}
 			}
 		}()
 	}
 
-	for _, f := range files {
-		ch <- f
+	// Close resultCh when all parsers finish.
+	go func() {
+		parseWg.Wait()
+		close(resultCh)
+	}()
+
+	// Feed files to parse workers.
+	go func() {
+		for _, f := range files {
+			parseCh <- f
+		}
+		close(parseCh)
+	}()
+
+	progressDone := startProgress(totalFiles, &indexed, &skipped, &found)
+
+	// Phase 2: serial writer — batched transactions, no lock contention.
+	const batchSize = 100
+	var batch []parseResult
+
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		tx, err := store.db.Begin()
+		if err != nil {
+			errCount += len(batch)
+			batch = batch[:0]
+			return
+		}
+
+		for _, pr := range batch {
+			err := store.InsertFileAllTx(tx, pr.entry.Path, pr.entry.RelPath,
+				pr.entry.Language, pr.hash, pr.entry.ModTime,
+				pr.result.Symbols, pr.result.Imports, pr.result.Refs)
+			if err != nil {
+				errCount++
+				continue
+			}
+			indexed.Add(1)
+			found.Add(int64(len(pr.result.Symbols)))
+		}
+
+		if err := tx.Commit(); err != nil {
+			errCount += len(batch)
+		}
+		batch = batch[:0]
 	}
-	close(ch)
-	wg.Wait()
+
+	for pr := range resultCh {
+		batch = append(batch, pr)
+		if len(batch) >= batchSize {
+			flushBatch()
+		}
+	}
+	flushBatch()
+
+	close(progressDone)
 
 	stats := &Stats{
 		FilesIndexed: int(indexed.Load()),
 		FilesSkipped: int(skipped.Load()),
 		SymbolsFound: int(found.Load()),
-		Errors:       int(errors.Load()),
+		Errors:       errCount,
 	}
 
 	// Summarization pass — runs after indexing is complete.
@@ -209,6 +261,35 @@ func Index(root, dbPath string, opts Options) (*Stats, error) {
 	}
 
 	return stats, nil
+}
+
+// startProgress launches a goroutine that prints indexing progress to stderr.
+// It only activates after 10s to avoid flicker on small repos.
+// Close the returned channel to stop it.
+func startProgress(total int, indexed, skipped, found *atomic.Int64) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(10 * time.Second):
+		case <-done:
+			return
+		}
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				n := indexed.Load() + skipped.Load()
+				pct := float64(n) / float64(total) * 100
+				fmt.Fprintf(os.Stderr, "\r  [%d/%d] %.1f%% — %d symbols found",
+					n, total, pct, found.Load())
+			case <-done:
+				fmt.Fprintf(os.Stderr, "\r%80s\r", "")
+				return
+			}
+		}
+	}()
+	return done
 }
 
 // pendingSymbol holds a symbol that needs summarization.
