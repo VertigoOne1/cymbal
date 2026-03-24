@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/1broseidon/cymbal/internal/index"
 	"github.com/spf13/cobra"
@@ -33,9 +34,31 @@ var impactCmd = &cobra.Command{
 			return writeJSON(results)
 		}
 
+		// Group results by depth.
+		maxDepth := 0
 		for _, r := range results {
-			fmt.Printf("[depth %d] %s \u2192 %s  (%s:%d)\n", r.Depth, r.Symbol, r.Caller, r.RelPath, r.Line)
+			if r.Depth > maxDepth {
+				maxDepth = r.Depth
+			}
 		}
+
+		var content strings.Builder
+		for d := 1; d <= maxDepth; d++ {
+			fmt.Fprintf(&content, "# depth %d\n", d)
+			for _, r := range results {
+				if r.Depth != d {
+					continue
+				}
+				line := readSourceLine(r.File, r.Line)
+				fmt.Fprintf(&content, "%s:%d: %s\n", r.RelPath, r.Line, strings.TrimSpace(line))
+			}
+		}
+
+		frontmatter([]kv{
+			{"symbol", name},
+			{"depth", fmt.Sprintf("%d", depth)},
+			{"total_callers", fmt.Sprintf("%d", len(results))},
+		}, content.String())
 		return nil
 	},
 }

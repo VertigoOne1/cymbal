@@ -51,47 +51,37 @@ Examples:
 
 		sym := result.Symbol
 
-		// Header.
-		fmt.Printf("=== Symbol: %s ===\n", sym.Name)
-		fmt.Printf("Kind:     %s\n", sym.Kind)
-		fmt.Printf("File:     %s:%d-%d\n", sym.RelPath, sym.StartLine, sym.EndLine)
-		fmt.Printf("Language: %s\n", sym.Language)
+		var content strings.Builder
 
-		// Source.
-		fmt.Println()
-		fmt.Println("=== Source ===")
-		lines := strings.Split(strings.TrimRight(result.Source, "\n"), "\n")
-		for i, line := range lines {
-			fmt.Printf("%4d  %s\n", sym.StartLine+i, line)
-		}
+		// Source section.
+		content.WriteString("# Source\n")
+		src := strings.TrimRight(result.Source, "\n")
+		content.WriteString(src)
+		content.WriteByte('\n')
 
-		// Type references.
-		if len(result.TypeRefs) > 0 {
-			fmt.Println()
-			fmt.Printf("=== Type References ===\n")
-			for _, r := range result.TypeRefs {
-				fmt.Printf("  %-12s %-20s %s:%d\n", r.Kind, r.Name, r.RelPath, r.StartLine)
-			}
-		}
-
-		// Callers.
+		// Callers section.
 		if len(result.Callers) > 0 {
-			fmt.Println()
-			fmt.Printf("=== Callers (%d) ===\n", len(result.Callers))
+			fmt.Fprintf(&content, "\n# Callers (%d)\n", len(result.Callers))
 			for _, r := range result.Callers {
-				fmt.Printf("  %s:%d\n", r.RelPath, r.Line)
+				line := readSourceLine(r.File, r.Line)
+				fmt.Fprintf(&content, "%s:%d: %s\n", r.RelPath, r.Line, strings.TrimSpace(line))
 			}
 		}
 
-		// File imports.
+		// File imports section.
 		if len(result.FileImports) > 0 {
-			fmt.Println()
-			fmt.Println("=== File Imports ===")
+			fmt.Fprintf(&content, "\n# Imports\n")
 			for _, imp := range result.FileImports {
-				fmt.Printf("  %s\n", imp)
+				content.WriteString(imp)
+				content.WriteByte('\n')
 			}
 		}
 
+		frontmatter([]kv{
+			{"symbol", sym.Name},
+			{"kind", sym.Kind},
+			{"file", fmt.Sprintf("%s:%d", sym.RelPath, sym.StartLine)},
+		}, content.String())
 		return nil
 	},
 }

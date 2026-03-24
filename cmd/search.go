@@ -49,9 +49,15 @@ Results are ranked: exact match > prefix > fuzzy.`,
 			return writeJSON(results)
 		}
 
+		var content strings.Builder
 		for _, r := range results {
-			fmt.Printf("%-12s %-40s %s:%d\n", r.Kind, r.Name, r.RelPath, r.StartLine)
+			fmt.Fprintf(&content, "%s %s %s:%d\n", r.Kind, r.Name, r.RelPath, r.StartLine)
 		}
+
+		frontmatter([]kv{
+			{"query", query},
+			{"result_count", fmt.Sprintf("%d", len(results))},
+		}, content.String())
 		return nil
 	},
 }
@@ -80,8 +86,14 @@ func searchText(dbPath, query, lang string, limit int, jsonOut bool) error {
 		return writeJSON(results)
 	}
 
+	var content strings.Builder
 	for _, r := range results {
-		fmt.Printf("%s:%d: %s\n", r.RelPath, r.Line, r.Snippet)
+		fmt.Fprintf(&content, "%s:%d: %s\n", r.RelPath, r.Line, r.Snippet)
 	}
+
+	frontmatter([]kv{
+		{"query", query},
+		{"result_count", fmt.Sprintf("%d", len(results))},
+	}, content.String())
 	return nil
 }

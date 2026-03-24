@@ -129,9 +129,20 @@ func showFile(target string, ctx int, jsonOut bool) error {
 		})
 	}
 
+	// Build content from lines.
+	var content strings.Builder
 	for _, l := range lines {
-		fmt.Printf("%4d  %s\n", l.Line, l.Content)
+		content.WriteString(l.Content)
+		content.WriteByte('\n')
 	}
+
+	loc := absPath
+	if startLine > 0 {
+		loc = fmt.Sprintf("%s:%d-%d", absPath, startLine, endLine)
+	}
+	frontmatter([]kv{
+		{"file", loc},
+	}, content.String())
 	return nil
 }
 
@@ -169,6 +180,37 @@ func showSymbol(dbPath, name string, ctx int, jsonOut bool) error {
 		endLine = endLine + ctx
 	}
 
-	target := fmt.Sprintf("%s:%d-%d", sym.File, startLine, endLine)
-	return showFile(target, 0, jsonOut)
+	if jsonOut {
+		target := fmt.Sprintf("%s:%d-%d", sym.File, startLine, endLine)
+		return showFile(target, 0, true)
+	}
+
+	// Read source and emit frontmatter format.
+	f, err := os.Open(sym.File)
+	if err != nil {
+		return fmt.Errorf("file not found: %s", sym.File)
+	}
+	defer f.Close()
+
+	var content strings.Builder
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		if lineNum < startLine {
+			continue
+		}
+		if lineNum > endLine {
+			break
+		}
+		content.WriteString(scanner.Text())
+		content.WriteByte('\n')
+	}
+
+	frontmatter([]kv{
+		{"symbol", sym.Name},
+		{"kind", sym.Kind},
+		{"file", fmt.Sprintf("%s:%d", sym.RelPath, sym.StartLine)},
+	}, content.String())
+	return nil
 }

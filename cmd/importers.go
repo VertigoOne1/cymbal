@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/1broseidon/cymbal/internal/index"
 	"github.com/spf13/cobra"
@@ -33,9 +34,15 @@ var importersCmd = &cobra.Command{
 			return writeJSON(results)
 		}
 
+		var content strings.Builder
 		for _, r := range results {
-			fmt.Printf("[depth %d] %s  (imports: %s)\n", r.Depth, r.RelPath, r.Import)
+			fmt.Fprintf(&content, "%s:%s\n", r.RelPath, r.Import)
 		}
+
+		frontmatter([]kv{
+			{"target", target},
+			{"importer_count", fmt.Sprintf("%d", len(results))},
+		}, content.String())
 		return nil
 	},
 }

@@ -39,18 +39,27 @@ var outlineCmd = &cobra.Command{
 			return writeJSON(symbols)
 		}
 
+		relPath := args[0]
+
+		var content strings.Builder
 		for _, s := range symbols {
 			indent := strings.Repeat("  ", s.Depth)
-			line := fmt.Sprintf("%s%-12s %s", indent, s.Kind, s.Name)
+			line := fmt.Sprintf("%s%s %s", indent, s.Kind, s.Name)
 			if sigs && s.Signature != "" {
 				line += s.Signature
 			}
-			line += fmt.Sprintf("  (L%d-%d)", s.StartLine, s.EndLine)
+			line += fmt.Sprintf(" (L%d-%d)", s.StartLine, s.EndLine)
 			if s.Summary != "" {
 				line += "  -- " + s.Summary
 			}
-			fmt.Println(line)
+			content.WriteString(line)
+			content.WriteByte('\n')
 		}
+
+		frontmatter([]kv{
+			{"file", relPath},
+			{"symbol_count", fmt.Sprintf("%d", len(symbols))},
+		}, content.String())
 		return nil
 	},
 }

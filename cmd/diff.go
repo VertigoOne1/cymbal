@@ -128,7 +128,11 @@ func runDiff(dbPath, name, base string, stat, jsonOut bool) error {
 		})
 	}
 
-	fmt.Print(filtered)
+	frontmatter([]kv{
+		{"symbol", sym.Name},
+		{"file", fmt.Sprintf("%s:%d", sym.RelPath, sym.StartLine)},
+		{"base", base},
+	}, filtered)
 	return nil
 }
 

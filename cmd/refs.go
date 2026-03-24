@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/1broseidon/cymbal/internal/index"
 	"github.com/spf13/cobra"
@@ -65,9 +66,16 @@ func refsSymbol(dbPath, name string, limit int, jsonOut bool) error {
 		return writeJSON(results)
 	}
 
+	var content strings.Builder
 	for _, r := range results {
-		fmt.Printf("%s:%d\n", r.RelPath, r.Line)
+		line := readSourceLine(r.File, r.Line)
+		fmt.Fprintf(&content, "%s:%d: %s\n", r.RelPath, r.Line, strings.TrimSpace(line))
 	}
+
+	frontmatter([]kv{
+		{"symbol", name},
+		{"ref_count", fmt.Sprintf("%d", len(results))},
+	}, content.String())
 	return nil
 }
 
@@ -86,8 +94,14 @@ func refsImporters(dbPath, name string, depth, limit int, jsonOut bool) error {
 		return writeJSON(results)
 	}
 
+	var content strings.Builder
 	for _, r := range results {
-		fmt.Printf("[depth %d] %s  (imports: %s)\n", r.Depth, r.RelPath, r.Import)
+		fmt.Fprintf(&content, "%s:%s\n", r.RelPath, r.Import)
 	}
+
+	frontmatter([]kv{
+		{"symbol", name},
+		{"importer_count", fmt.Sprintf("%d", len(results))},
+	}, content.String())
 	return nil
 }

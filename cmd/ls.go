@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/1broseidon/cymbal/internal/index"
 	"github.com/1broseidon/cymbal/internal/walker"
@@ -77,13 +78,16 @@ func lsStats(cmd *cobra.Command, jsonOut bool) error {
 		return writeJSON(stats)
 	}
 
-	fmt.Printf("Repository: %s\n", stats.Path)
-	fmt.Printf("Files:      %d\n", stats.FileCount)
-	fmt.Printf("Symbols:    %d\n", stats.SymbolCount)
-	fmt.Printf("Languages:\n")
+	var content strings.Builder
 	for lang, count := range stats.Languages {
-		fmt.Printf("  %-16s %d files\n", lang, count)
+		fmt.Fprintf(&content, "%-16s %d files\n", lang, count)
 	}
+
+	frontmatter([]kv{
+		{"repo", stats.Path},
+		{"files", fmt.Sprintf("%d", stats.FileCount)},
+		{"symbols", fmt.Sprintf("%d", stats.SymbolCount)},
+	}, content.String())
 	return nil
 }
 
