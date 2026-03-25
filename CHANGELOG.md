@@ -2,6 +2,13 @@
 
 All notable changes to cymbal are documented here.
 
+## [0.5.1] - 2026-03-25
+
+### Fixed
+
+- `show` and `investigate` now accept `file:Symbol` syntax to disambiguate when multiple symbols share a name (e.g., `cymbal show config.go:Config`, `cymbal investigate internal/config/config.go:Config`).
+- `show` line range parser accepts `L`-prefixed ranges (`file.go:L119-L132`) — was advertised in README but broken.
+
 ## [0.5.0] - 2026-03-25
 
 ### Added
