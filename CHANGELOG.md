@@ -2,6 +2,12 @@
 
 All notable changes to cymbal are documented here.
 
+## [0.8.1] - 2026-03-27
+
+### Fixed
+
+- `cymbal structure` "Try" suggestions now deduplicated by symbol name — no more repeated suggestions when the same symbol appears in multiple files.
+
 ## [0.8.0] - 2026-03-27
 
 ### Added
